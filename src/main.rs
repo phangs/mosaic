@@ -205,6 +205,150 @@ fn stitch_frames(frames: Vec<RgbaImage>) -> RgbaImage {
     result
 }
 
+fn find_overlap_horizontal(img1: &RgbaImage, img2: &RgbaImage) -> u32 {
+    let (width, height) = img1.dimensions();
+    let mut best_overlap = 0;
+    let mut min_diff = u64::MAX;
+
+    let min_o = width / 10;
+    
+    let start_y = height / 10;
+    let end_y = height * 9 / 10;
+    let step_y = 4;
+    let step_x = 2;
+
+    for o in (min_o..=width).rev() {
+        let mut diff: u64 = 0;
+        let mut count = 0;
+        let mut early_exit = false;
+        
+        for x in (0..o).step_by(step_x as usize) {
+            for y in (start_y..end_y).step_by(step_y as usize) {
+                let p1 = img1.get_pixel(width - o + x, y);
+                let p2 = img2.get_pixel(x, y);
+                
+                let r_diff = (p1[0] as i32 - p2[0] as i32).abs() as u64;
+                let g_diff = (p1[1] as i32 - p2[1] as i32).abs() as u64;
+                let b_diff = (p1[2] as i32 - p2[2] as i32).abs() as u64;
+                
+                diff += r_diff + g_diff + b_diff;
+                count += 1;
+            }
+            
+            if count > 500 {
+                let avg = diff / count as u64;
+                if min_diff != u64::MAX && avg > min_diff + 20 {
+                    early_exit = true;
+                    break;
+                }
+            }
+        }
+        
+        if !early_exit && count > 0 {
+            let avg_diff = diff / count as u64;
+            if avg_diff < min_diff {
+                min_diff = avg_diff;
+                best_overlap = o;
+                
+                if min_diff == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    
+    if min_diff < 30 {
+        best_overlap
+    } else {
+        0
+    }
+}
+
+fn stitch_frames_horizontal(frames: Vec<RgbaImage>) -> RgbaImage {
+    if frames.is_empty() {
+        return RgbaImage::new(0, 0);
+    }
+    if frames.len() == 1 {
+        return frames[0].clone();
+    }
+    
+    let (width, height) = frames[0].dimensions();
+    
+    let mut offsets = vec![0];
+    let mut total_width = width;
+    
+    for i in 1..frames.len() {
+        let overlap = find_overlap_horizontal(&frames[i-1], &frames[i]);
+        let new_width = width - overlap;
+        
+        if new_width < 5 {
+            offsets.push(0);
+        } else {
+            offsets.push(new_width);
+            total_width += new_width;
+        }
+    }
+    
+    let mut result = RgbaImage::new(total_width, height);
+    image::imageops::replace(&mut result, &frames[0], 0, 0);
+    
+    let mut current_x = width as i64;
+    for i in 1..frames.len() {
+        if offsets[i] == 0 {
+            continue;
+        }
+        
+        let overlap = width - offsets[i];
+        let new_part = image::imageops::crop_imm(&frames[i], overlap, 0, offsets[i], height).to_image();
+        image::imageops::replace(&mut result, &new_part, current_x, 0);
+        current_x += offsets[i] as i64;
+    }
+    
+    result
+}
+
+fn premium_circular_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    bg_color: egui::Color32,
+    text_color: egui::Color32,
+    size: f32,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(size, size),
+        egui::Sense::click(),
+    );
+    
+    let is_hovered = response.hovered();
+    let is_clicked = response.clicked();
+    
+    let current_bg = if is_clicked {
+        bg_color.gamma_multiply(0.7)
+    } else if is_hovered {
+        bg_color.gamma_multiply(0.9)
+    } else {
+        bg_color.gamma_multiply(0.8)
+    };
+    
+    ui.painter().circle_filled(rect.center(), size / 2.0, current_bg);
+    ui.painter().circle_stroke(
+        rect.center(),
+        size / 2.0,
+        egui::Stroke::new(1.5, egui::Color32::from_white_alpha(150)),
+    );
+    
+    let font_id = egui::FontId::proportional(size * 0.45);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font_id,
+        text_color,
+    );
+    
+    is_clicked
+}
+
 fn save_and_clipboard(img: RgbaImage, prefix: &str, config: &AppConfig) {
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("{}_{}.png", prefix, timestamp);
@@ -249,7 +393,7 @@ fn save_and_clipboard(img: RgbaImage, prefix: &str, config: &AppConfig) {
             .spawn();
     }
 
-    let summary = if prefix == "scroll" {
+    let summary = if prefix.starts_with("scroll") {
         "Scrolling Capture Done"
     } else {
         "Screen Capture Done"
@@ -293,6 +437,7 @@ struct ScreamshotApp {
     
     scroll_rect: Option<egui::Rect>,
     scroll_frames: Arc<Mutex<Vec<RgbaImage>>>,
+    scroll_horizontal: bool,
     config: AppConfig,
 }
 
@@ -333,6 +478,7 @@ impl ScreamshotApp {
             selection_current: None,
             scroll_rect: None,
             scroll_frames: Arc::new(Mutex::new(Vec::new())),
+            scroll_horizontal: false,
             config,
         }
     }
@@ -418,135 +564,256 @@ impl eframe::App for ScreamshotApp {
         }
 
         if self.state == AppState::CapturingScroll {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("Scrolling Capture");
-                
-                let num_frames = self.scroll_frames.lock().unwrap().len();
-                ui.label(format!("Captured frames: {}", num_frames));
-                ui.separator();
-                
-                ui.label("Trigger auto-scroll & capture:");
-                
-                ui.vertical(|ui| {
-                    if ui.button("Scroll Page & Capture").clicked() {
-                        if let Some(rect) = self.scroll_rect {
-                            let frames_arc = Arc::clone(&self.scroll_frames);
-                            let ctx_clone = ctx.clone();
-                            
-                            // Hide the control panel window FIRST so it doesn't block the screen
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            
-                            std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                                
-                                // Simulate PageDown key press
-                                if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                                    let _ = enigo.key(Key::PageDown, Direction::Click);
-                                }
-                                
-                                // Wait for smooth scrolling to settle
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                                
-                                // Capture the new frame
-                                if let Ok(monitors) = xcap::Monitor::all() {
-                                    if let Some(monitor) = monitors.first() {
-                                        if let Ok(mut img) = monitor.capture_image() {
-                                            let min_x = rect.min.x as u32;
-                                            let min_y = rect.min.y as u32;
-                                            let width = rect.width() as u32;
-                                            let height = rect.height() as u32;
-                                            if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                let mut frames = frames_arc.lock().unwrap();
-                                                frames.push(cropped);
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                // Re-show our window
-                                ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            });
-                        }
-                    }
-                    
-                    if ui.button("Scroll Down (Line) & Capture").clicked() {
-                        if let Some(rect) = self.scroll_rect {
-                            let frames_arc = Arc::clone(&self.scroll_frames);
-                            let ctx_clone = ctx.clone();
-                            
-                            // Hide the control panel window FIRST
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            
-                            std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                                
-                                // Simulate DownArrow key press multiple times
-                                if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                                    for _ in 0..5 {
-                                        let _ = enigo.key(Key::DownArrow, Direction::Click);
-                                        std::thread::sleep(std::time::Duration::from_millis(30));
-                                    }
-                                }
-                                
-                                // Wait for smooth scrolling to settle
-                                std::thread::sleep(std::time::Duration::from_millis(400));
-                                
-                                // Capture the new frame
-                                if let Ok(monitors) = xcap::Monitor::all() {
-                                    if let Some(monitor) = monitors.first() {
-                                        if let Ok(mut img) = monitor.capture_image() {
-                                            let min_x = rect.min.x as u32;
-                                            let min_y = rect.min.y as u32;
-                                            let width = rect.width() as u32;
-                                            let height = rect.height() as u32;
-                                            if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                let mut frames = frames_arc.lock().unwrap();
-                                                frames.push(cropped);
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                // Re-show our window
-                                ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            });
-                        }
-                    }
-                });
-                
-                ui.separator();
-                
-                ui.horizontal(|ui| {
-                    if ui.button("Finish & Stitch").clicked() {
-                        let frames = {
-                            let mut frames_guard = self.scroll_frames.lock().unwrap();
-                            std::mem::take(&mut *frames_guard)
-                        };
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
+                .show(ctx, |ui| {
+                    if let Some(rect) = self.scroll_rect {
+                        let screen_rect = ctx.viewport_rect();
                         
-                        let cfg = self.config.clone();
-                        if !frames.is_empty() {
-                            std::thread::spawn(move || {
-                                println!("Stitching {} frames...", frames.len());
-                                let stitched = stitch_frames(frames);
-                                save_and_clipboard(stitched, "scroll", &cfg);
+                        // 1. Draw selection region outline (dashed/cyan border)
+                        ui.painter().rect_stroke(
+                            rect, 
+                            0.0, 
+                            egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 255)), 
+                            egui::StrokeKind::Inside
+                        );
+                        
+                        // Draw a subtle translucent inner fill
+                        ui.painter().rect_filled(
+                            rect,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(0, 255, 255, 10)
+                        );
+
+                        // 2. Draw dark overlays covering everything OUTSIDE the selected rect
+                        // Top
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(screen_rect.min, egui::pos2(screen_rect.max.x, rect.min.y)),
+                            0.0,
+                            egui::Color32::from_black_alpha(150),
+                        );
+                        // Bottom
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(egui::pos2(screen_rect.min.x, rect.max.y), screen_rect.max),
+                            0.0,
+                            egui::Color32::from_black_alpha(150),
+                        );
+                        // Left
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(egui::pos2(screen_rect.min.x, rect.min.y), egui::pos2(rect.min.x, rect.max.y)),
+                            0.0,
+                            egui::Color32::from_black_alpha(150),
+                        );
+                        // Right
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(egui::pos2(rect.max.x, rect.min.y), egui::pos2(screen_rect.max.x, rect.max.y)),
+                            0.0,
+                            egui::Color32::from_black_alpha(150),
+                        );
+
+                        // Render frame counter badge above the region
+                        let num_frames = self.scroll_frames.lock().unwrap().len();
+                        let badge_pos = egui::pos2(rect.center().x - 60.0, rect.min.y + 15.0);
+                        egui::Area::new(egui::Id::new("scroll_badge"))
+                            .fixed_pos(badge_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ctx, |ui| {
+                                egui::Frame::NONE
+                                    .fill(egui::Color32::from_black_alpha(200))
+                                    .corner_radius(8)
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.colored_label(
+                                            egui::Color32::WHITE,
+                                            format!("Captured: {} frames", num_frames)
+                                        );
+                                    });
                             });
+
+                        // Calculate constrained button positions
+                        let margin = 70.0;
+                        
+                        // Down Arrow Button (Scroll Down)
+                        let mut down_pos = egui::pos2(rect.center().x - 25.0, rect.max.y + 15.0);
+                        if down_pos.y > screen_rect.max.y - margin {
+                            down_pos.y = rect.max.y - 65.0;
                         }
                         
-                        self.state = AppState::Hidden;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    }
-                    
-                    if ui.button("Cancel").clicked() {
-                        self.scroll_frames.lock().unwrap().clear();
-                        self.state = AppState::Hidden;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        egui::Area::new(egui::Id::new("btn_down"))
+                            .fixed_pos(down_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ctx, |ui| {
+                                if premium_circular_button(
+                                    ui,
+                                    "⬇",
+                                    egui::Color32::from_rgb(0, 120, 255),
+                                    egui::Color32::WHITE,
+                                    50.0
+                                ) {
+                                    self.scroll_horizontal = false;
+                                    let frames_arc = Arc::clone(&self.scroll_frames);
+                                    let ctx_clone = ctx.clone();
+                                    
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                                    
+                                    std::thread::spawn(move || {
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        
+                                        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                                            for _ in 0..6 {
+                                                let _ = enigo.key(Key::DownArrow, Direction::Click);
+                                                std::thread::sleep(std::time::Duration::from_millis(30));
+                                            }
+                                        }
+                                        
+                                        std::thread::sleep(std::time::Duration::from_millis(400));
+                                        
+                                        if let Ok(monitors) = xcap::Monitor::all() {
+                                            if let Some(monitor) = monitors.first() {
+                                                if let Ok(mut img) = monitor.capture_image() {
+                                                    let min_x = rect.min.x as u32;
+                                                    let min_y = rect.min.y as u32;
+                                                    let width = rect.width() as u32;
+                                                    let height = rect.height() as u32;
+                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                        let mut frames = frames_arc.lock().unwrap();
+                                                        frames.push(cropped);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                    });
+                                }
+                            });
+
+                        // Right Arrow Button (Scroll Right)
+                        let mut right_pos = egui::pos2(rect.max.x + 15.0, rect.center().y - 25.0);
+                        if right_pos.x > screen_rect.max.x - margin {
+                            right_pos.x = rect.max.x - 65.0;
+                        }
+                        
+                        egui::Area::new(egui::Id::new("btn_right"))
+                            .fixed_pos(right_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ctx, |ui| {
+                                if premium_circular_button(
+                                    ui,
+                                    "➡",
+                                    egui::Color32::from_rgb(140, 0, 255),
+                                    egui::Color32::WHITE,
+                                    50.0
+                                ) {
+                                    self.scroll_horizontal = true;
+                                    let frames_arc = Arc::clone(&self.scroll_frames);
+                                    let ctx_clone = ctx.clone();
+                                    
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                                    
+                                    std::thread::spawn(move || {
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        
+                                        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                                            for _ in 0..6 {
+                                                let _ = enigo.key(Key::RightArrow, Direction::Click);
+                                                std::thread::sleep(std::time::Duration::from_millis(30));
+                                            }
+                                        }
+                                        
+                                        std::thread::sleep(std::time::Duration::from_millis(400));
+                                        
+                                        if let Ok(monitors) = xcap::Monitor::all() {
+                                            if let Some(monitor) = monitors.first() {
+                                                if let Ok(mut img) = monitor.capture_image() {
+                                                    let min_x = rect.min.x as u32;
+                                                    let min_y = rect.min.y as u32;
+                                                    let width = rect.width() as u32;
+                                                    let height = rect.height() as u32;
+                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                        let mut frames = frames_arc.lock().unwrap();
+                                                        frames.push(cropped);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                    });
+                                }
+                            });
+
+                        // Save/Finish Button (Checkmark)
+                        let mut finish_pos = egui::pos2(rect.max.x - 60.0, rect.min.y - 65.0);
+                        if finish_pos.y < 10.0 {
+                            finish_pos.y = rect.min.y + 15.0;
+                        }
+                        
+                        egui::Area::new(egui::Id::new("btn_finish"))
+                            .fixed_pos(finish_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ctx, |ui| {
+                                if premium_circular_button(
+                                    ui,
+                                    "✓",
+                                    egui::Color32::from_rgb(0, 200, 80),
+                                    egui::Color32::WHITE,
+                                    44.0
+                                ) {
+                                    let frames = {
+                                        let mut frames_guard = self.scroll_frames.lock().unwrap();
+                                        std::mem::take(&mut *frames_guard)
+                                    };
+                                    
+                                    let cfg = self.config.clone();
+                                    let is_horizontal = self.scroll_horizontal;
+                                    
+                                    if !frames.is_empty() {
+                                        std::thread::spawn(move || {
+                                            println!("Stitching {} frames...", frames.len());
+                                            if is_horizontal {
+                                                let stitched = stitch_frames_horizontal(frames);
+                                                save_and_clipboard(stitched, "scroll_horizontal", &cfg);
+                                            } else {
+                                                let stitched = stitch_frames(frames);
+                                                save_and_clipboard(stitched, "scroll", &cfg);
+                                            }
+                                        });
+                                    }
+                                    
+                                    self.state = AppState::Hidden;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                                }
+                            });
+
+                        // Cancel Button (Cross)
+                        let mut cancel_pos = egui::pos2(rect.min.x, rect.min.y - 65.0);
+                        if cancel_pos.y < 10.0 {
+                            cancel_pos.y = rect.min.y + 15.0;
+                        }
+                        
+                        egui::Area::new(egui::Id::new("btn_cancel"))
+                            .fixed_pos(cancel_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ctx, |ui| {
+                                if premium_circular_button(
+                                    ui,
+                                    "✕",
+                                    egui::Color32::from_rgb(220, 40, 40),
+                                    egui::Color32::WHITE,
+                                    44.0
+                                ) {
+                                    self.scroll_frames.lock().unwrap().clear();
+                                    self.state = AppState::Hidden;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                                }
+                            });
                     }
                 });
-            });
             
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
 
@@ -617,18 +884,8 @@ impl eframe::App for ScreamshotApp {
                                     let frames_arc = Arc::clone(&self.scroll_frames);
                                     frames_arc.lock().unwrap().clear();
                                     
-                                    // Switch state and resize window FIRST to ensure overlay disappears
+                                    // Switch state and KEEP transparent window fullscreen
                                     self.state = AppState::CapturingScroll;
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(350.0, 200.0)));
-                                    
-                                    let center_x = screen_rect.width() / 2.0;
-                                    let pos_x = if rect.center().x > center_x {
-                                        50.0
-                                    } else {
-                                        screen_rect.width() - 400.0
-                                    };
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(pos_x, 50.0)));
                                     
                                     // Capture first frame in background
                                     std::thread::spawn(move || {
@@ -792,5 +1049,54 @@ mod tests {
         // Height should be 100 + (100 - 40) = 160
         assert_eq!(stitched.width(), 100);
         assert_eq!(stitched.height(), 160);
+    }
+
+    #[test]
+    fn test_find_overlap_horizontal_perfect() {
+        let mut img1 = RgbaImage::new(100, 100);
+        let mut img2 = RgbaImage::new(100, 100);
+
+        // Fill img1 with a gradient
+        for (x, y, pixel) in img1.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, y as u8, 0, 255]);
+        }
+
+        // Fill img2 such that it overlaps with the right 40 pixels of img1
+        // img1's right 40 pixels (x: 60..100) are copied to img2's left 40 pixels (x: 0..40)
+        for y in 0..100 {
+            for x in 0..40 {
+                *img2.get_pixel_mut(x, y) = *img1.get_pixel(60 + x, y);
+            }
+            // Fill the rest of img2 with something else
+            for x in 40..100 {
+                *img2.get_pixel_mut(x, y) = image::Rgba([x as u8 + 100, y as u8, 50, 255]);
+            }
+        }
+
+        let overlap = find_overlap_horizontal(&img1, &img2);
+        assert_eq!(overlap, 40);
+    }
+
+    #[test]
+    fn test_stitch_frames_horizontal() {
+        let mut img1 = RgbaImage::new(100, 100);
+        let mut img2 = RgbaImage::new(100, 100);
+
+        for (x, y, pixel) in img1.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, y as u8, 0, 255]);
+        }
+        for y in 0..100 {
+            for x in 0..40 {
+                *img2.get_pixel_mut(x, y) = *img1.get_pixel(60 + x, y);
+            }
+            for x in 40..100 {
+                *img2.get_pixel_mut(x, y) = image::Rgba([x as u8 + 100, y as u8, 50, 255]);
+            }
+        }
+
+        let stitched = stitch_frames_horizontal(vec![img1, img2]);
+        // Width should be 100 + (100 - 40) = 160
+        assert_eq!(stitched.width(), 160);
+        assert_eq!(stitched.height(), 100);
     }
 }
