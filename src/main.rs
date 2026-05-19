@@ -5,7 +5,7 @@ use tray_icon::{
     TrayIcon, TrayIconBuilder, Icon,
 };
 use std::sync::{Arc, Mutex};
-use enigo::{Enigo, Keyboard, Key, Settings, Direction};
+use enigo::{Enigo, Keyboard, Key, Settings, Direction, Mouse, Button, Coordinate};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppConfig {
@@ -63,7 +63,7 @@ fn save_config(config: &AppConfig) {
 
 fn update_autostart(enabled: bool) {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let mut autostart_dir = std::path::PathBuf::from(home);
+    let mut autostart_dir = std::path::PathBuf::from(&home);
     autostart_dir.push(".config");
     autostart_dir.push("autostart");
     std::fs::create_dir_all(&autostart_dir).ok();
@@ -74,15 +74,23 @@ fn update_autostart(enabled: bool) {
     if enabled {
         if let Ok(current_exe) = std::env::current_exe() {
             let current_exe_str = current_exe.to_string_lossy();
+            
+            let mut icon_path = std::path::PathBuf::from(&home);
+            icon_path.push(".local");
+            icon_path.push("share");
+            icon_path.push("icons");
+            icon_path.push("screamshot.png");
+            
             let content = format!(
                 "[Desktop Entry]\n\
                 Type=Application\n\
                 Name=Screamshot\n\
                 Exec={}\n\
-                Icon=camera-photo\n\
+                Icon={}\n\
                 Comment=Region-Based Scrolling Capture\n\
                 Terminal=false\n",
-                current_exe_str
+                current_exe_str,
+                icon_path.to_string_lossy()
             );
             let _ = std::fs::write(desktop_file, content);
         }
@@ -91,16 +99,144 @@ fn update_autostart(enabled: bool) {
     }
 }
 
-fn generate_icon() -> Icon {
-    let width = 32;
-    let height = 32;
+fn generate_icon_raw() -> (Vec<u8>, u32, u32) {
+    let width = 64;
+    let height = 64;
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
+    
+    let cx = 31.5;
+    let cy = 31.5;
+    
     for (x, y, pixel) in img.enumerate_pixels_mut() {
-        let r = (x as f32 / width as f32 * 255.0) as u8;
-        let b = (y as f32 / height as f32 * 255.0) as u8;
-        *pixel = Rgba([r, 0, b, 255]);
+        let px = x as f32;
+        let py = y as f32;
+        
+        let dx = px - cx;
+        let dy = py - cy;
+        
+        let mut r = 0.0;
+        let mut g = 0.0;
+        let mut b = 0.0;
+        let mut a = 0.0;
+        
+        let mut blend = |br: f32, bg: f32, bb: f32, ba: f32| {
+            if ba <= 0.0 { return; }
+            let out_a = ba + a * (1.0 - ba);
+            if out_a > 0.0 {
+                r = (br * ba + r * a * (1.0 - ba)) / out_a;
+                g = (bg * ba + g * a * (1.0 - ba)) / out_a;
+                b = (bb * ba + b * a * (1.0 - ba)) / out_a;
+                a = out_a;
+            }
+        };
+        
+        // 1. Camera Body/Base Frame: A sleek, dark rounded rectangle
+        let rx = dx.abs() - 12.0;
+        let ry = dy.abs() - 9.0;
+        let dist_box = if rx > 0.0 && ry > 0.0 {
+            (rx*rx + ry*ry).sqrt() - 6.0
+        } else if rx > 0.0 {
+            rx - 6.0
+        } else if ry > 0.0 {
+            ry - 6.0
+        } else {
+            rx.max(ry) - 6.0
+        };
+        
+        if dist_box < 1.0 {
+            let antialias = (1.0 - dist_box).clamp(0.0, 1.0);
+            let body_a = 0.85 * antialias;
+            let grad = (dy + 15.0) / 30.0;
+            let body_r = 30.0 + grad * 20.0;
+            let body_g = 25.0 + grad * 15.0;
+            let body_b = 45.0 + grad * 25.0;
+            blend(body_r / 255.0, body_g / 255.0, body_b / 255.0, body_a);
+        }
+        
+        // 2. Camera Flash/LED indicator
+        let dist_led = ((dx - 10.0).powi(2) + (dy + 7.0).powi(2)).sqrt();
+        if dist_led < 2.5 {
+            let antialias = (2.5 - dist_led).clamp(0.0, 1.0);
+            blend(1.0, 0.2, 0.4, 0.9 * antialias);
+        }
+        
+        // 3. Camera Lens Base Ring
+        let l_cx = -2.0;
+        let l_cy = 1.0;
+        let dist_lens = ((dx - l_cx).powi(2) + (dy - l_cy).powi(2)).sqrt();
+        if dist_lens < 11.5 {
+            let antialias = (11.5 - dist_lens).clamp(0.0, 1.0).min((dist_lens - 8.5).clamp(0.0, 1.0));
+            blend(0.05, 0.05, 0.1, 0.9 * antialias);
+        }
+        
+        // 4. Glowing Neon Lens Ring (Gradient from Cyan to Purple)
+        if dist_lens < 10.0 && dist_lens > 8.0 {
+            let antialias = (1.0 - (dist_lens - 9.0).abs()).clamp(0.0, 1.0);
+            let angle = dy.atan2(dx);
+            let t = (angle + std::f32::consts::PI) / (2.0 * std::f32::consts::PI);
+            let lr = 0.0 + t * 0.6;
+            let lg = 0.9 - t * 0.9;
+            let lb = 0.95 + t * 0.05;
+            blend(lr, lg, lb, 0.95 * antialias);
+        }
+        
+        // 5. Deep glossy lens glass
+        if dist_lens < 8.0 {
+            let antialias = (8.0 - dist_lens).clamp(0.0, 1.0);
+            let glass_t = ((dx - l_cx + 6.0) + (dy - l_cy + 6.0)) / 20.0;
+            let gr = 0.05 + glass_t * 0.15;
+            let gg = 0.02 + glass_t * 0.1;
+            let gb = 0.12 + glass_t * 0.3;
+            blend(gr, gg, gb, 0.9 * antialias);
+        }
+        
+        // 6. Lens Reflection Flare
+        let ref_cx = l_cx - 3.0;
+        let ref_cy = l_cy - 3.0;
+        let dist_ref = ((dx - ref_cx).powi(2) + (dy - ref_cy).powi(2)).sqrt();
+        if dist_ref < 2.2 {
+            let antialias = (2.2 - dist_ref).clamp(0.0, 1.0);
+            blend(1.0, 1.0, 1.0, 0.85 * antialias);
+        }
+        
+        // 7. Futuristic Crop brackets at the 4 corners
+        let adx = dx.abs();
+        let ady = dy.abs();
+        if adx >= 20.0 && adx <= 26.0 && ady >= 20.0 && ady <= 26.0 {
+            let on_edge_x = (adx - 26.0).abs() < 1.5;
+            let on_edge_y = (ady - 26.0).abs() < 1.5;
+            let is_corner_bend = (on_edge_x && ady >= 20.0) || (on_edge_y && adx >= 20.0);
+            
+            if is_corner_bend {
+                let dist_bracket = if on_edge_x {
+                    (adx - 26.0).abs()
+                } else {
+                    (ady - 26.0).abs()
+                };
+                let antialias = (1.5 - dist_bracket).clamp(0.0, 1.0);
+                blend(0.0, 0.9, 1.0, 0.95 * antialias);
+            }
+        }
+        
+        *pixel = Rgba([
+            (r * 255.0) as u8,
+            (g * 255.0) as u8,
+            (b * 255.0) as u8,
+            (a * 255.0) as u8,
+        ]);
     }
-    Icon::from_rgba(img.into_raw(), width, height).expect("Failed to create icon")
+    
+    (img.into_raw(), width, height)
+}
+
+fn generate_icon() -> Icon {
+    let (rgba, width, height) = generate_icon_raw();
+    Icon::from_rgba(rgba, width, height).expect("Failed to create icon")
+}
+
+fn generate_egui_icon() -> egui::IconData {
+    let (rgba, width, height) = generate_icon_raw();
+    egui::IconData { rgba, width, height }
 }
 
 fn find_overlap(img1: &RgbaImage, img2: &RgbaImage) -> u32 {
@@ -307,11 +443,18 @@ fn stitch_frames_horizontal(frames: Vec<RgbaImage>) -> RgbaImage {
     result
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ButtonIcon {
+    DownArrow,
+    RightArrow,
+    Checkmark,
+    Cross,
+}
+
 fn premium_circular_button(
     ui: &mut egui::Ui,
-    text: &str,
+    icon: ButtonIcon,
     bg_color: egui::Color32,
-    text_color: egui::Color32,
     size: f32,
 ) -> bool {
     let (rect, response) = ui.allocate_exact_size(
@@ -337,17 +480,62 @@ fn premium_circular_button(
         egui::Stroke::new(1.5, egui::Color32::from_white_alpha(150)),
     );
     
-    let font_id = egui::FontId::proportional(size * 0.45);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        text,
-        font_id,
-        text_color,
-    );
+    let center = rect.center();
+    let half_w = size * 0.22;
+    let stroke = egui::Stroke::new(2.5, egui::Color32::WHITE);
+    
+    match icon {
+        ButtonIcon::DownArrow => {
+            ui.painter().line_segment(
+                [center - egui::vec2(0.0, half_w * 0.8), center + egui::vec2(0.0, half_w * 0.6)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [center + egui::vec2(0.0, half_w * 0.6), center + egui::vec2(-half_w * 0.5, half_w * 0.1)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [center + egui::vec2(0.0, half_w * 0.6), center + egui::vec2(half_w * 0.5, half_w * 0.1)],
+                stroke,
+            );
+        }
+        ButtonIcon::RightArrow => {
+            ui.painter().line_segment(
+                [center - egui::vec2(half_w * 0.8, 0.0), center + egui::vec2(half_w * 0.6, 0.0)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [center + egui::vec2(half_w * 0.6, 0.0), center + egui::vec2(half_w * 0.1, -half_w * 0.5)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [center + egui::vec2(half_w * 0.6, 0.0), center + egui::vec2(half_w * 0.1, half_w * 0.5)],
+                stroke,
+            );
+        }
+        ButtonIcon::Checkmark => {
+            let p1 = center + egui::vec2(-half_w * 0.7, -half_w * 0.1);
+            let p2 = center + egui::vec2(-half_w * 0.1, half_w * 0.5);
+            let p3 = center + egui::vec2(half_w * 0.7, -half_w * 0.5);
+            ui.painter().line_segment([p1, p2], stroke);
+            ui.painter().line_segment([p2, p3], stroke);
+        }
+        ButtonIcon::Cross => {
+            let offset = half_w * 0.6;
+            ui.painter().line_segment(
+                [center + egui::vec2(-offset, -offset), center + egui::vec2(offset, offset)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [center + egui::vec2(offset, -offset), center + egui::vec2(-offset, offset)],
+                stroke,
+            );
+        }
+    }
     
     is_clicked
 }
+
 
 fn save_and_clipboard(img: RgbaImage, prefix: &str, config: &AppConfig) {
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -420,6 +608,62 @@ enum AppState {
     SelectingScrollRegion,
     CapturingScroll,
     EditingSettings,
+}
+
+fn get_desktop_bounds() -> (i32, i32, i32, i32) {
+    if let Ok(monitors) = xcap::Monitor::all() {
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        for m in &monitors {
+            let mx = m.x().unwrap_or(0);
+            let my = m.y().unwrap_or(0);
+            let mw = m.width().unwrap_or(0) as i32;
+            let mh = m.height().unwrap_or(0) as i32;
+            min_x = min_x.min(mx);
+            min_y = min_y.min(my);
+            max_x = max_x.max(mx + mw);
+            max_y = max_y.max(my + mh);
+        }
+        if min_x != i32::MAX {
+            return (min_x, min_y, max_x - min_x, max_y - min_y);
+        }
+    }
+    (0, 0, 1920, 1080)
+}
+
+fn get_monitor_and_crop_coords(
+    start_x_relative: f32,
+    start_y_relative: f32,
+    rect_min_x_relative: f32,
+    rect_min_y_relative: f32,
+) -> Option<(xcap::Monitor, u32, u32)> {
+    let (desktop_min_x, desktop_min_y, _, _) = get_desktop_bounds();
+    let global_start_x = desktop_min_x + start_x_relative as i32;
+    let global_start_y = desktop_min_y + start_y_relative as i32;
+    
+    let monitor = xcap::Monitor::from_point(global_start_x, global_start_y).ok()
+        .or_else(|| {
+            xcap::Monitor::all().ok()?.first().cloned()
+        })?;
+        
+    let global_rect_x = desktop_min_x + rect_min_x_relative as i32;
+    let global_rect_y = desktop_min_y + rect_min_y_relative as i32;
+    
+    let crop_x = (global_rect_x - monitor.x().unwrap_or(0)).max(0) as u32;
+    let crop_y = (global_rect_y - monitor.y().unwrap_or(0)).max(0) as u32;
+    
+    Some((monitor, crop_x, crop_y))
+}
+
+fn show_overlay(ctx: &egui::Context) {
+    let (min_x, min_y, width, height) = get_desktop_bounds();
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(min_x as f32, min_y as f32)));
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width as f32, height as f32)));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
 
 struct ScreamshotApp {
@@ -503,14 +747,10 @@ impl eframe::App for ScreamshotApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if event.id == self.capture_region_i.id() {
                 self.state = AppState::SelectingRegion;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                show_overlay(ctx);
             } else if event.id == self.capture_scrolling_i.id() {
                 self.state = AppState::SelectingScrollRegion;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                show_overlay(ctx);
             } else if event.id == self.settings_i.id() {
                 self.state = AppState::EditingSettings;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -643,48 +883,56 @@ impl eframe::App for ScreamshotApp {
                             .fixed_pos(down_pos)
                             .order(egui::Order::Foreground)
                             .show(ctx, |ui| {
-                                if premium_circular_button(
-                                    ui,
-                                    "⬇",
-                                    egui::Color32::from_rgb(0, 120, 255),
-                                    egui::Color32::WHITE,
-                                    50.0
-                                ) {
+                                 if premium_circular_button(
+                                     ui,
+                                     ButtonIcon::DownArrow,
+                                     egui::Color32::from_rgb(0, 120, 255),
+                                     50.0
+                                 ) {
                                     self.scroll_horizontal = false;
                                     let frames_arc = Arc::clone(&self.scroll_frames);
                                     let ctx_clone = ctx.clone();
                                     
+                                    let capture_info = get_monitor_and_crop_coords(
+                                        rect.min.x,
+                                        rect.min.y,
+                                        rect.min.x,
+                                        rect.min.y,
+                                    );
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                                    
+                                     
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(200));
-                                        
-                                        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                                            for _ in 0..6 {
-                                                let _ = enigo.key(Key::DownArrow, Direction::Click);
-                                                std::thread::sleep(std::time::Duration::from_millis(30));
+                                         
+                                        if let Some((ref monitor, min_x, min_y)) = capture_info {
+                                            let abs_x = monitor.x().unwrap_or(0) + min_x as i32;
+                                            let abs_y = monitor.y().unwrap_or(0) + min_y as i32;
+                                            
+                                            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                                                let _ = enigo.move_mouse(abs_x + 5, abs_y + 5, Coordinate::Abs);
+                                                let _ = enigo.button(Button::Left, Direction::Click);
+                                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                                let _ = enigo.move_mouse(down_pos.x as i32, down_pos.y as i32, Coordinate::Abs);
+                                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                                let _ = enigo.key(Key::PageDown, Direction::Click);
                                             }
                                         }
-                                        
+                                         
                                         std::thread::sleep(std::time::Duration::from_millis(400));
-                                        
-                                        if let Ok(monitors) = xcap::Monitor::all() {
-                                            if let Some(monitor) = monitors.first() {
-                                                if let Ok(mut img) = monitor.capture_image() {
-                                                    let min_x = rect.min.x as u32;
-                                                    let min_y = rect.min.y as u32;
-                                                    let width = rect.width() as u32;
-                                                    let height = rect.height() as u32;
-                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                        let mut frames = frames_arc.lock().unwrap();
-                                                        frames.push(cropped);
-                                                    }
+                                         
+                                        if let Some((monitor, min_x, min_y)) = capture_info {
+                                            if let Ok(mut img) = monitor.capture_image() {
+                                                let width = rect.width() as u32;
+                                                let height = rect.height() as u32;
+                                                if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                    let mut frames = frames_arc.lock().unwrap();
+                                                    frames.push(cropped);
                                                 }
                                             }
                                         }
-                                        
-                                        ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                         
+                                        show_overlay(&ctx_clone);
                                     });
                                 }
                             });
@@ -699,48 +947,59 @@ impl eframe::App for ScreamshotApp {
                             .fixed_pos(right_pos)
                             .order(egui::Order::Foreground)
                             .show(ctx, |ui| {
-                                if premium_circular_button(
-                                    ui,
-                                    "➡",
-                                    egui::Color32::from_rgb(140, 0, 255),
-                                    egui::Color32::WHITE,
-                                    50.0
-                                ) {
+                                 if premium_circular_button(
+                                     ui,
+                                     ButtonIcon::RightArrow,
+                                     egui::Color32::from_rgb(140, 0, 255),
+                                     50.0
+                                 ) {
                                     self.scroll_horizontal = true;
                                     let frames_arc = Arc::clone(&self.scroll_frames);
                                     let ctx_clone = ctx.clone();
                                     
+                                    let capture_info = get_monitor_and_crop_coords(
+                                        rect.min.x,
+                                        rect.min.y,
+                                        rect.min.x,
+                                        rect.min.y,
+                                    );
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                                    
+                                     
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(200));
-                                        
-                                        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                                            for _ in 0..6 {
-                                                let _ = enigo.key(Key::RightArrow, Direction::Click);
-                                                std::thread::sleep(std::time::Duration::from_millis(30));
-                                            }
-                                        }
-                                        
-                                        std::thread::sleep(std::time::Duration::from_millis(400));
-                                        
-                                        if let Ok(monitors) = xcap::Monitor::all() {
-                                            if let Some(monitor) = monitors.first() {
-                                                if let Ok(mut img) = monitor.capture_image() {
-                                                    let min_x = rect.min.x as u32;
-                                                    let min_y = rect.min.y as u32;
-                                                    let width = rect.width() as u32;
-                                                    let height = rect.height() as u32;
-                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                        let mut frames = frames_arc.lock().unwrap();
-                                                        frames.push(cropped);
-                                                    }
+                                         
+                                        if let Some((ref monitor, min_x, min_y)) = capture_info {
+                                            let abs_x = monitor.x().unwrap_or(0) + min_x as i32;
+                                            let abs_y = monitor.y().unwrap_or(0) + min_y as i32;
+                                            
+                                            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                                                let _ = enigo.move_mouse(abs_x + 5, abs_y + 5, Coordinate::Abs);
+                                                let _ = enigo.button(Button::Left, Direction::Click);
+                                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                                let _ = enigo.move_mouse(right_pos.x as i32, right_pos.y as i32, Coordinate::Abs);
+                                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                                for _ in 0..6 {
+                                                    let _ = enigo.key(Key::RightArrow, Direction::Click);
+                                                    std::thread::sleep(std::time::Duration::from_millis(30));
                                                 }
                                             }
                                         }
-                                        
-                                        ctx_clone.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                         
+                                        std::thread::sleep(std::time::Duration::from_millis(400));
+                                         
+                                        if let Some((monitor, min_x, min_y)) = capture_info {
+                                            if let Ok(mut img) = monitor.capture_image() {
+                                                let width = rect.width() as u32;
+                                                let height = rect.height() as u32;
+                                                if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                    let mut frames = frames_arc.lock().unwrap();
+                                                    frames.push(cropped);
+                                                }
+                                            }
+                                        }
+                                         
+                                        show_overlay(&ctx_clone);
                                     });
                                 }
                             });
@@ -755,13 +1014,12 @@ impl eframe::App for ScreamshotApp {
                             .fixed_pos(finish_pos)
                             .order(egui::Order::Foreground)
                             .show(ctx, |ui| {
-                                if premium_circular_button(
-                                    ui,
-                                    "✓",
-                                    egui::Color32::from_rgb(0, 200, 80),
-                                    egui::Color32::WHITE,
-                                    44.0
-                                ) {
+                                 if premium_circular_button(
+                                     ui,
+                                     ButtonIcon::Checkmark,
+                                     egui::Color32::from_rgb(0, 200, 80),
+                                     44.0
+                                 ) {
                                     let frames = {
                                         let mut frames_guard = self.scroll_frames.lock().unwrap();
                                         std::mem::take(&mut *frames_guard)
@@ -798,13 +1056,12 @@ impl eframe::App for ScreamshotApp {
                             .fixed_pos(cancel_pos)
                             .order(egui::Order::Foreground)
                             .show(ctx, |ui| {
-                                if premium_circular_button(
-                                    ui,
-                                    "✕",
-                                    egui::Color32::from_rgb(220, 40, 40),
-                                    egui::Color32::WHITE,
-                                    44.0
-                                ) {
+                                 if premium_circular_button(
+                                     ui,
+                                     ButtonIcon::Cross,
+                                     egui::Color32::from_rgb(220, 40, 40),
+                                     44.0
+                                 ) {
                                     self.scroll_frames.lock().unwrap().clear();
                                     self.state = AppState::Hidden;
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -847,8 +1104,6 @@ impl eframe::App for ScreamshotApp {
 
                     if response.drag_stopped() {
                         if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
-                            let min_x = start.x.min(end.x) as u32;
-                            let min_y = start.y.min(end.y) as u32;
                             let width = (start.x - end.x).abs() as u32;
                             let height = (start.y - end.y).abs() as u32;
 
@@ -862,17 +1117,21 @@ impl eframe::App for ScreamshotApp {
                                     self.state = AppState::Hidden;
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                                     let cfg = self.config.clone();
+                                    let capture_info = get_monitor_and_crop_coords(
+                                        start.x,
+                                        start.y,
+                                        start.x.min(end.x),
+                                        start.y.min(end.y),
+                                    );
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(200));
-                                        if let Ok(monitors) = xcap::Monitor::all() {
-                                            if let Some(monitor) = monitors.first() {
-                                                if let Ok(mut img) = monitor.capture_image() {
-                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                        save_and_clipboard(cropped, "screenshot", &cfg);
-                                                    } else {
-                                                        println!("Selection out of bounds");
-                                                    }
+                                        if let Some((monitor, min_x, min_y)) = capture_info {
+                                            if let Ok(mut img) = monitor.capture_image() {
+                                                if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                    save_and_clipboard(cropped, "screenshot", &cfg);
+                                                } else {
+                                                    println!("Selection out of bounds");
                                                 }
                                             }
                                         }
@@ -884,22 +1143,29 @@ impl eframe::App for ScreamshotApp {
                                     let frames_arc = Arc::clone(&self.scroll_frames);
                                     frames_arc.lock().unwrap().clear();
                                     
-                                    // Switch state and KEEP transparent window fullscreen
                                     self.state = AppState::CapturingScroll;
+                                    
+                                    let capture_info = get_monitor_and_crop_coords(
+                                        start.x,
+                                        start.y,
+                                        start.x.min(end.x),
+                                        start.y.min(end.y),
+                                    );
+                                    let ctx_clone = ctx.clone();
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                                     
                                     // Capture first frame in background
                                     std::thread::spawn(move || {
-                                        std::thread::sleep(std::time::Duration::from_millis(400));
-                                        if let Ok(monitors) = xcap::Monitor::all() {
-                                            if let Some(monitor) = monitors.first() {
-                                                if let Ok(mut img) = monitor.capture_image() {
-                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                        frames_arc.lock().unwrap().push(cropped);
-                                                    }
+                                        std::thread::sleep(std::time::Duration::from_millis(300));
+                                        if let Some((monitor, min_x, min_y)) = capture_info {
+                                            if let Ok(mut img) = monitor.capture_image() {
+                                                if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                    frames_arc.lock().unwrap().push(cropped);
                                                 }
                                             }
                                         }
+                                        show_overlay(&ctx_clone);
                                     });
                                 }
                             } else {
@@ -925,6 +1191,23 @@ fn ensure_desktop_entry() {
         let current_exe_str = current_exe.to_string_lossy();
         
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        
+        // Save the premium icon to ~/.local/share/icons/screamshot.png
+        let mut icon_dir = std::path::PathBuf::from(&home);
+        icon_dir.push(".local");
+        icon_dir.push("share");
+        icon_dir.push("icons");
+        std::fs::create_dir_all(&icon_dir).ok();
+        
+        let mut icon_path = icon_dir.clone();
+        icon_path.push("screamshot.png");
+        
+        // Generate the raw icon bytes and save them as a PNG!
+        let (rgba, width, height) = generate_icon_raw();
+        if let Some(rgba_img) = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, rgba) {
+            let _ = rgba_img.save(&icon_path);
+        }
+        
         let mut app_dir = std::path::PathBuf::from(&home);
         app_dir.push(".local");
         app_dir.push("share");
@@ -939,11 +1222,12 @@ fn ensure_desktop_entry() {
             Type=Application\n\
             Name=Screamshot\n\
             Exec={}\n\
-            Icon=camera-photo\n\
+            Icon={}\n\
             Comment=Region-Based Scrolling Capture\n\
             Terminal=false\n\
             Categories=Utility;\n",
-            current_exe_str
+            current_exe_str,
+            icon_path.to_string_lossy()
         );
         
         let should_write = if let Ok(existing) = std::fs::read_to_string(&desktop_file) {
@@ -970,7 +1254,8 @@ fn main() -> Result<(), eframe::Error> {
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
-            .with_visible(false),
+            .with_visible(false)
+            .with_icon(std::sync::Arc::new(generate_egui_icon())),
         ..Default::default()
     };
     eframe::run_native(
@@ -984,6 +1269,66 @@ fn main() -> Result<(), eframe::Error> {
 mod tests {
     use super::*;
     use image::RgbaImage;
+
+    #[test]
+    fn test_monitors() {
+        use gtk::prelude::*;
+
+        // Initialize GTK so GDK is active
+        let _ = gtk::init();
+
+        println!("--- XCAP Monitors ---");
+        if let Ok(monitors) = xcap::Monitor::all() {
+            for (i, m) in monitors.iter().enumerate() {
+                println!(
+                    "Monitor {}: x={:?}, y={:?}, width={:?}, height={:?}, is_primary={:?}",
+                    i,
+                    m.x(),
+                    m.y(),
+                    m.width(),
+                    m.height(),
+                    m.is_primary()
+                );
+            }
+        }
+
+        println!("--- GDK Pointer ---");
+        if let Some(display) = gtk::gdk::Display::default() {
+            if let Some(seat) = display.default_seat() {
+                if let Some(pointer) = seat.pointer() {
+                    let (_, x, y): (gtk::gdk::Screen, i32, i32) = pointer.position();
+                    println!("Pointer position: x={}, y={}", x, y);
+                    if let Ok(m) = xcap::Monitor::from_point(x, y) {
+                        println!(
+                            "XCAP Monitor at pointer: x={:?}, y={:?}, width={:?}, height={:?}",
+                            m.x(),
+                            m.y(),
+                            m.width(),
+                            m.height()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_desktop_bounds_logic() {
+        let (x, y, w, h) = get_desktop_bounds();
+        assert!(w > 0);
+        assert!(h > 0);
+        println!("Desktop bounds: x={}, y={}, w={}, h={}", x, y, w, h);
+    }
+
+    #[test]
+    fn test_get_monitor_and_crop_coords_logic() {
+        let (min_x, min_y, _, _) = get_desktop_bounds();
+        if let Some((monitor, crop_x, crop_y)) = get_monitor_and_crop_coords(0.0, 0.0, 10.0, 10.0) {
+            println!("Matched monitor: x={:?}, y={:?}", monitor.x(), monitor.y());
+            assert_eq!(crop_x, (min_x + 10 - monitor.x().unwrap_or(0)) as u32);
+            assert_eq!(crop_y, (min_y + 10 - monitor.y().unwrap_or(0)) as u32);
+        }
+    }
 
     #[test]
     fn test_find_overlap_perfect() {
