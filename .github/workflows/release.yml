@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     name: Build - ${{ matrix.platform.os-name }}
@@ -60,7 +63,13 @@ jobs:
             libxkbcommon-dev \
             libgtk-3-dev \
             pkg-config \
-            build-essential
+            build-essential \
+            libclang-dev \
+            libxcb1-dev \
+            libxrandr-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libegl-dev
 
       - name: Cache Cargo Dependencies
         uses: actions/cache@v4
