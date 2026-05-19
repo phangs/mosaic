@@ -1760,6 +1760,14 @@ impl eframe::App for MosaicApp {
             gtk::glib::MainContext::default().iteration(false);
         }
 
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.tray_icon.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.state = AppState::Hidden;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+
         if let Ok(img) = self.image_receiver.try_recv() {
             let (width, height) = img.dimensions();
             let mut blurred_img = img.clone();
