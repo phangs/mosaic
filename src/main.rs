@@ -637,20 +637,24 @@ fn get_desktop_bounds() -> (i32, i32, i32, i32) {
     (0, 0, 1920, 1080)
 }
 
+fn get_monitor_from_point(x: i32, y: i32) -> Option<xcap::Monitor> {
+    xcap::Monitor::from_point(x, y).ok()
+        .or_else(|| {
+            xcap::Monitor::all().ok()?.first().cloned()
+        })
+}
+
 fn get_monitor_and_crop_coords(
     start_x_relative: f32,
     start_y_relative: f32,
     rect_min_x_relative: f32,
     rect_min_y_relative: f32,
-) -> Option<(xcap::Monitor, u32, u32)> {
+) -> Option<(i32, i32, u32, u32)> {
     let (desktop_min_x, desktop_min_y, _, _) = get_desktop_bounds();
     let global_start_x = desktop_min_x + start_x_relative as i32;
     let global_start_y = desktop_min_y + start_y_relative as i32;
     
-    let monitor = xcap::Monitor::from_point(global_start_x, global_start_y).ok()
-        .or_else(|| {
-            xcap::Monitor::all().ok()?.first().cloned()
-        })?;
+    let monitor = get_monitor_from_point(global_start_x, global_start_y)?;
         
     let global_rect_x = desktop_min_x + rect_min_x_relative as i32;
     let global_rect_y = desktop_min_y + rect_min_y_relative as i32;
@@ -658,7 +662,7 @@ fn get_monitor_and_crop_coords(
     let crop_x = (global_rect_x - monitor.x().unwrap_or(0)).max(0) as u32;
     let crop_y = (global_rect_y - monitor.y().unwrap_or(0)).max(0) as u32;
     
-    Some((monitor, crop_x, crop_y))
+    Some((global_start_x, global_start_y, crop_x, crop_y))
 }
 
 fn show_overlay(ctx: &egui::Context) {
@@ -908,30 +912,34 @@ impl eframe::App for ScreamshotApp {
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(200));
                                          
-                                        if let Some((ref monitor, min_x, min_y)) = capture_info {
-                                            let abs_x = monitor.x().unwrap_or(0) + min_x as i32;
-                                            let abs_y = monitor.y().unwrap_or(0) + min_y as i32;
-                                            
-                                            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                                                let _ = enigo.move_mouse(abs_x + 5, abs_y + 5, Coordinate::Abs);
-                                                let _ = enigo.button(Button::Left, Direction::Click);
-                                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                                let _ = enigo.move_mouse(down_pos.x as i32, down_pos.y as i32, Coordinate::Abs);
-                                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                                let _ = enigo.key(Key::PageDown, Direction::Click);
+                                        if let Some((global_start_x, global_start_y, min_x, min_y)) = capture_info {
+                                            if let Some(monitor) = get_monitor_from_point(global_start_x, global_start_y) {
+                                                let abs_x = monitor.x().unwrap_or(0) + min_x as i32;
+                                                let abs_y = monitor.y().unwrap_or(0) + min_y as i32;
+                                                
+                                                if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                                                    let _ = enigo.move_mouse(abs_x + 5, abs_y + 5, Coordinate::Abs);
+                                                    let _ = enigo.button(Button::Left, Direction::Click);
+                                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                                    let _ = enigo.move_mouse(down_pos.x as i32, down_pos.y as i32, Coordinate::Abs);
+                                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                                    let _ = enigo.key(Key::PageDown, Direction::Click);
+                                                }
                                             }
                                         }
                                          
                                         std::thread::sleep(std::time::Duration::from_millis(400));
                                          
-                                        if let Some((monitor, min_x, min_y)) = capture_info {
-                                            if let Ok(mut img) = monitor.capture_image() {
-                                                let width = rect.width() as u32;
-                                                let height = rect.height() as u32;
-                                                if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                    let mut frames = frames_arc.lock().unwrap();
-                                                    frames.push(cropped);
+                                        if let Some((global_start_x, global_start_y, min_x, min_y)) = capture_info {
+                                            if let Some(monitor) = get_monitor_from_point(global_start_x, global_start_y) {
+                                                if let Ok(mut img) = monitor.capture_image() {
+                                                    let width = rect.width() as u32;
+                                                    let height = rect.height() as u32;
+                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                        let mut frames = frames_arc.lock().unwrap();
+                                                        frames.push(cropped);
+                                                    }
                                                 }
                                             }
                                         }
@@ -972,33 +980,37 @@ impl eframe::App for ScreamshotApp {
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(200));
                                          
-                                        if let Some((ref monitor, min_x, min_y)) = capture_info {
-                                            let abs_x = monitor.x().unwrap_or(0) + min_x as i32;
-                                            let abs_y = monitor.y().unwrap_or(0) + min_y as i32;
-                                            
-                                            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                                                let _ = enigo.move_mouse(abs_x + 5, abs_y + 5, Coordinate::Abs);
-                                                let _ = enigo.button(Button::Left, Direction::Click);
-                                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                                let _ = enigo.move_mouse(right_pos.x as i32, right_pos.y as i32, Coordinate::Abs);
-                                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                                for _ in 0..6 {
-                                                    let _ = enigo.key(Key::RightArrow, Direction::Click);
-                                                    std::thread::sleep(std::time::Duration::from_millis(30));
+                                        if let Some((global_start_x, global_start_y, min_x, min_y)) = capture_info {
+                                            if let Some(monitor) = get_monitor_from_point(global_start_x, global_start_y) {
+                                                let abs_x = monitor.x().unwrap_or(0) + min_x as i32;
+                                                let abs_y = monitor.y().unwrap_or(0) + min_y as i32;
+                                                
+                                                if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                                                    let _ = enigo.move_mouse(abs_x + 5, abs_y + 5, Coordinate::Abs);
+                                                    let _ = enigo.button(Button::Left, Direction::Click);
+                                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                                    let _ = enigo.move_mouse(right_pos.x as i32, right_pos.y as i32, Coordinate::Abs);
+                                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                                    for _ in 0..6 {
+                                                        let _ = enigo.key(Key::RightArrow, Direction::Click);
+                                                        std::thread::sleep(std::time::Duration::from_millis(30));
+                                                    }
                                                 }
                                             }
                                         }
                                          
                                         std::thread::sleep(std::time::Duration::from_millis(400));
                                          
-                                        if let Some((monitor, min_x, min_y)) = capture_info {
-                                            if let Ok(mut img) = monitor.capture_image() {
-                                                let width = rect.width() as u32;
-                                                let height = rect.height() as u32;
-                                                if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                    let mut frames = frames_arc.lock().unwrap();
-                                                    frames.push(cropped);
+                                        if let Some((global_start_x, global_start_y, min_x, min_y)) = capture_info {
+                                            if let Some(monitor) = get_monitor_from_point(global_start_x, global_start_y) {
+                                                if let Ok(mut img) = monitor.capture_image() {
+                                                    let width = rect.width() as u32;
+                                                    let height = rect.height() as u32;
+                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                        let mut frames = frames_arc.lock().unwrap();
+                                                        frames.push(cropped);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1129,13 +1141,15 @@ impl eframe::App for ScreamshotApp {
                                     );
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(200));
-                                        if let Some((monitor, min_x, min_y)) = capture_info {
-                                            if let Ok(mut img) = monitor.capture_image() {
-                                                if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                    save_and_clipboard(cropped, "screenshot", &cfg);
-                                                } else {
-                                                    println!("Selection out of bounds");
+                                        if let Some((global_start_x, global_start_y, min_x, min_y)) = capture_info {
+                                            if let Some(monitor) = get_monitor_from_point(global_start_x, global_start_y) {
+                                                if let Ok(mut img) = monitor.capture_image() {
+                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                        save_and_clipboard(cropped, "screenshot", &cfg);
+                                                    } else {
+                                                        println!("Selection out of bounds");
+                                                    }
                                                 }
                                             }
                                         }
@@ -1161,11 +1175,13 @@ impl eframe::App for ScreamshotApp {
                                     // Capture first frame in background
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(300));
-                                        if let Some((monitor, min_x, min_y)) = capture_info {
-                                            if let Ok(mut img) = monitor.capture_image() {
-                                                if min_x + width <= img.width() && min_y + height <= img.height() {
-                                                    let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
-                                                    frames_arc.lock().unwrap().push(cropped);
+                                        if let Some((global_start_x, global_start_y, min_x, min_y)) = capture_info {
+                                            if let Some(monitor) = get_monitor_from_point(global_start_x, global_start_y) {
+                                                if let Ok(mut img) = monitor.capture_image() {
+                                                    if min_x + width <= img.width() && min_y + height <= img.height() {
+                                                        let cropped = image::imageops::crop(&mut img, min_x, min_y, width, height).to_image();
+                                                        frames_arc.lock().unwrap().push(cropped);
+                                                    }
                                                 }
                                             }
                                         }
