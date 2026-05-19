@@ -1,6 +1,6 @@
-# Contributing to Screamshot 🤝
+# Contributing to Mosaic 🤝
 
-First off, thank you for considering contributing to Screamshot! Contributions make the open-source community an amazing place to learn, inspire, and create.
+First off, thank you for considering contributing to Mosaic! Contributions make the open-source community an amazing place to learn, inspire, and create.
 
 All types of contributions are welcome: bug fixes, feature requests, documentation improvements, and architectural optimizations.
 
@@ -8,7 +8,7 @@ All types of contributions are welcome: bug fixes, feature requests, documentati
 
 ## 🛠️ Local Development Workflow
 
-Screamshot is built purely in Rust. To set up your local development environment:
+Mosaic is built purely in Rust. To set up your local development environment:
 
 1. **Setup Rust**: Install Rust via [rustup](https://rustup.rs/).
 2. **System Prerequisites**: Ensure GTK, X11/Wayland, and DBus headers are installed (refer to the system prerequisites in the [README.md](README.md)).
@@ -29,7 +29,7 @@ Screamshot is built purely in Rust. To set up your local development environment
 
 ## 🏗️ Code Architecture & Guidelines
 
-Screamshot uses an event-driven design integrating `eframe`/`egui` for premium transparent UI overlays with `tray-icon` for system tray controls.
+Mosaic uses an event-driven design integrating `eframe`/`egui` for premium transparent UI overlays with `tray-icon` for system tray controls.
 
 ### State Flow
 ```rust
